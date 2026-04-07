@@ -210,39 +210,34 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
   const [settingsJson, setSettingsJson] = useState('')
   const [settingsJsonError, setSettingsJsonError] = useState<string | null>(null)
 
-  // Load current settings.json and merge provider env
+  // Load current settings.json and merge provider env (or show as-is for official)
   useEffect(() => {
     import('../api/settings').then(({ settingsApi }) => {
       settingsApi.getUser().then((settings) => {
-        const merged = {
-          ...settings,
-          env: {
-            ...((settings.env as Record<string, string>) || {}),
-            ANTHROPIC_BASE_URL: baseUrl,
-            ANTHROPIC_AUTH_TOKEN: apiKey || '(your API key)',
-            ANTHROPIC_MODEL: models.main,
-            ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
-            ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
-            ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
-          },
+        if (selectedPreset.id === 'official') {
+          // Official: show current settings as-is (env keys will be cleared on save)
+          setSettingsJson(JSON.stringify(settings, null, 2))
+        } else {
+          const merged = {
+            ...settings,
+            env: {
+              ...((settings.env as Record<string, string>) || {}),
+              ANTHROPIC_BASE_URL: baseUrl,
+              ANTHROPIC_AUTH_TOKEN: apiKey || '(your API key)',
+              ANTHROPIC_MODEL: models.main,
+              ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
+              ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
+              ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
+            },
+          }
+          setSettingsJson(JSON.stringify(merged, null, 2))
         }
-        setSettingsJson(JSON.stringify(merged, null, 2))
       }).catch(() => {
-        const fallback = {
-          env: {
-            ANTHROPIC_BASE_URL: baseUrl,
-            ANTHROPIC_AUTH_TOKEN: apiKey || '(your API key)',
-            ANTHROPIC_MODEL: models.main,
-            ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
-            ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
-            ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
-          },
-        }
-        setSettingsJson(JSON.stringify(fallback, null, 2))
+        setSettingsJson(JSON.stringify({}, null, 2))
       })
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [selectedPreset.id])
 
   const handlePresetChange = (preset: typeof initialPreset) => {
     setSelectedPreset(preset)
@@ -363,15 +358,13 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
           </div>
         )}
 
-        {/* Official — no config needed */}
-        {isOfficial && mode === 'create' ? (
-          <div className="text-sm text-[var(--color-text-secondary)] py-4 text-center border border-dashed border-[var(--color-border)] rounded-xl">
-            Official provider uses Anthropic native login — no API key or configuration needed.
-          </div>
-        ) : (
-          <>
-            <Input label="Name" required value={name} onChange={(e) => setName(e.target.value)} placeholder="Provider name" />
+        <Input label="Name" required value={name} onChange={(e) => setName(e.target.value)} placeholder="Provider name" />
 
+        <Input label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional notes..." />
+
+        {/* Non-official: Base URL, API Key, Model Mapping, Test */}
+        {!isOfficial && (
+          <>
             {/* Base URL */}
             {isCustom || mode === 'edit' ? (
               <Input label="Base URL" required value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.example.com/anthropic" />
@@ -393,9 +386,7 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
               placeholder={mode === 'edit' ? '****' : 'sk-...'}
             />
 
-            <Input label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional notes..." />
-
-            {/* Model Mapping — always visible */}
+            {/* Model Mapping */}
             <div>
               <label className="text-sm font-medium text-[var(--color-text-primary)] mb-2 block">Model Mapping</label>
               <div className="grid grid-cols-2 gap-2">
@@ -417,37 +408,36 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
                 </span>
               )}
             </div>
-
-            {/* Settings JSON — editable */}
-            <div>
-              <label className="text-sm font-medium text-[var(--color-text-primary)] mb-2 block">Settings JSON</label>
-              <textarea
-                value={settingsJson}
-                onChange={(e) => {
-                  setSettingsJson(e.target.value)
-                  // Validate JSON on change
-                  try {
-                    JSON.parse(e.target.value)
-                    setSettingsJsonError(null)
-                  } catch (err) {
-                    setSettingsJsonError(err instanceof Error ? err.message : 'Invalid JSON')
-                  }
-                }}
-                rows={16}
-                spellCheck={false}
-                className={`w-full text-xs px-3 py-3 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border font-mono leading-relaxed resize-y text-[var(--color-text-secondary)] outline-none ${
-                  settingsJsonError
-                    ? 'border-[var(--color-error)] focus:border-[var(--color-error)]'
-                    : 'border-[var(--color-border)] focus:border-[var(--color-border-focus)]'
-                }`}
-              />
-              {settingsJsonError && (
-                <p className="text-[11px] text-[var(--color-error)] mt-1">JSON syntax error: {settingsJsonError}</p>
-              )}
-              <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">Full ~/.claude/settings.json content. Edit directly — will be written on save.</p>
-            </div>
           </>
         )}
+
+        {/* Settings JSON — editable, shown for all presets including official */}
+        <div>
+          <label className="text-sm font-medium text-[var(--color-text-primary)] mb-2 block">Settings JSON</label>
+          <textarea
+            value={settingsJson}
+            onChange={(e) => {
+              setSettingsJson(e.target.value)
+              try {
+                JSON.parse(e.target.value)
+                setSettingsJsonError(null)
+              } catch (err) {
+                setSettingsJsonError(err instanceof Error ? err.message : 'Invalid JSON')
+              }
+            }}
+            rows={16}
+            spellCheck={false}
+            className={`w-full text-xs px-3 py-3 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border font-mono leading-relaxed resize-y text-[var(--color-text-secondary)] outline-none ${
+              settingsJsonError
+                ? 'border-[var(--color-error)] focus:border-[var(--color-error)]'
+                : 'border-[var(--color-border)] focus:border-[var(--color-border-focus)]'
+            }`}
+          />
+          {settingsJsonError && (
+            <p className="text-[11px] text-[var(--color-error)] mt-1">JSON syntax error: {settingsJsonError}</p>
+          )}
+          <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">~/.claude/settings.json — edit directly, will be written on save.</p>
+        </div>
       </div>
     </Modal>
   )
