@@ -152,9 +152,37 @@ export class WsBridge {
     })
   }
 
+  /** Wait until the WebSocket for chatId is open. Resolves false on timeout or error. */
+  waitForOpen(chatId: string, timeoutMs = 10_000): Promise<boolean> {
+    const session = this.sessions.get(chatId)
+    if (!session) return Promise.resolve(false)
+    if (session.ws.readyState === WebSocket.OPEN) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        cleanup()
+        resolve(false)
+      }, timeoutMs)
+      const onOpen = () => { cleanup(); resolve(true) }
+      const onError = () => { cleanup(); resolve(false) }
+      const onClose = () => { cleanup(); resolve(false) }
+      const cleanup = () => {
+        clearTimeout(timer)
+        session.ws.removeListener('open', onOpen)
+        session.ws.removeListener('error', onError)
+        session.ws.removeListener('close', onClose)
+      }
+      session.ws.once('open', onOpen)
+      session.ws.once('error', onError)
+      session.ws.once('close', onClose)
+    })
+  }
+
   private send(chatId: string, message: Record<string, unknown>): boolean {
     const session = this.sessions.get(chatId)
-    if (!session || session.ws.readyState !== WebSocket.OPEN) return false
+    if (!session || session.ws.readyState !== WebSocket.OPEN) {
+      console.warn(`[WsBridge] Cannot send to ${chatId}: session not ready`)
+      return false
+    }
     session.ws.send(JSON.stringify(message))
     return true
   }

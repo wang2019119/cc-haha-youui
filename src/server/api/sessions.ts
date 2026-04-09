@@ -248,13 +248,23 @@ async function getRecentProjects(): Promise<Response> {
   const { sessions } = await sessionService.listSessions({ limit: 200 })
   const validSessions = sessions.filter((session) => session.workDirExists && session.workDir)
 
-  // Group sessions by projectPath and find most recent per project
-  const projectMap = new Map<string, { modifiedAt: string; sessionCount: number; sessionId: string }>()
+  // First pass: resolve realPath for each session and group by realPath to dedup
+  const realPathMap = new Map<string, { projectPath: string; modifiedAt: string; sessionCount: number; sessionId: string }>()
   for (const s of validSessions) {
-    const existing = projectMap.get(s.projectPath)
+    // Resolve the real path for dedup
+    let realPath: string
+    try {
+      const workDir = await sessionService.getSessionWorkDir(s.id)
+      realPath = workDir || sessionService.desanitizePath(s.projectPath)
+    } catch {
+      realPath = sessionService.desanitizePath(s.projectPath)
+    }
+
+    const existing = realPathMap.get(realPath)
     if (!existing || s.modifiedAt > existing.modifiedAt) {
-      projectMap.set(s.projectPath, {
-        modifiedAt: existing ? s.modifiedAt : s.modifiedAt,
+      realPathMap.set(realPath, {
+        projectPath: s.projectPath,
+        modifiedAt: s.modifiedAt,
         sessionCount: (existing?.sessionCount ?? 0) + 1,
         sessionId: s.id,
       })
@@ -263,7 +273,7 @@ async function getRecentProjects(): Promise<Response> {
     }
   }
 
-  // Build project list with real paths
+  // Build project list with git info
   const projects: Array<{
     projectPath: string
     realPath: string
@@ -275,17 +285,8 @@ async function getRecentProjects(): Promise<Response> {
     sessionCount: number
   }> = []
 
-  for (const [projectPath, info] of projectMap) {
-    // Try to get real workDir from the most recent session
-    let realPath: string
-    try {
-      const workDir = await sessionService.getSessionWorkDir(info.sessionId)
-      realPath = workDir || sessionService.desanitizePath(projectPath)
-    } catch {
-      realPath = sessionService.desanitizePath(projectPath)
-    }
-
-    const projectName = realPath.split('/').filter(Boolean).pop() || projectPath
+  for (const [realPath, info] of realPathMap) {
+    const projectName = realPath.split('/').filter(Boolean).pop() || info.projectPath
 
     // Check if it's a git repo
     let isGit = false
@@ -316,7 +317,7 @@ async function getRecentProjects(): Promise<Response> {
     } catch { /* not a git repo or dir doesn't exist */ }
 
     projects.push({
-      projectPath, realPath, projectName, isGit, repoName, branch,
+      projectPath: info.projectPath, realPath, projectName, isGit, repoName, branch,
       modifiedAt: info.modifiedAt, sessionCount: info.sessionCount,
     })
   }

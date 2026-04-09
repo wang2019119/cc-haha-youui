@@ -100,7 +100,7 @@ async function ensureSession(chatId: string): Promise<boolean> {
   if (stored) {
     bridge.connectSession(chatId, stored.sessionId)
     bridge.onServerMessage(chatId, (msg) => handleServerMessage(chatId, msg))
-    return true
+    return await bridge.waitForOpen(chatId)
   }
 
   const workDir = config.defaultProjectDir
@@ -119,6 +119,11 @@ async function createSessionForChat(chatId: string, workDir: string): Promise<bo
     sessionStore.set(chatId, sessionId, workDir)
     bridge.connectSession(chatId, sessionId)
     bridge.onServerMessage(chatId, (msg) => handleServerMessage(chatId, msg))
+    const opened = await bridge.waitForOpen(chatId)
+    if (!opened) {
+      await bot.api.sendMessage(numericChatId, '⚠️ 连接服务器超时，请重试。')
+      return false
+    }
     return true
   } catch (err) {
     await bot.api.sendMessage(numericChatId,
@@ -168,10 +173,28 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
       break
 
     case 'content_start':
-      if (msg.blockType === 'text' && !placeholders.has(chatId)) {
-        const sent = await bot.api.sendMessage(numericChatId, '▍')
-        placeholders.set(chatId, { chatId, messageId: sent.message_id })
-        accumulatedText.set(chatId, '')
+      if (msg.blockType === 'text') {
+        if (!placeholders.has(chatId)) {
+          const sent = await bot.api.sendMessage(numericChatId, '▍')
+          placeholders.set(chatId, { chatId, messageId: sent.message_id })
+          accumulatedText.set(chatId, '')
+        }
+      } else if (msg.blockType === 'tool_use') {
+        // Finalize current text placeholder before tool calls,
+        // so text after tools gets a fresh message
+        await buf.complete()
+        // If placeholder still exists (buffer was already empty), clean up directly
+        if (placeholders.has(chatId)) {
+          const text = accumulatedText.get(chatId)
+          if (text?.trim()) {
+            try {
+              await bot.api.editMessageText(numericChatId, placeholders.get(chatId)!.messageId, text)
+            } catch { /* ignore */ }
+          }
+          placeholders.delete(chatId)
+          accumulatedText.delete(chatId)
+          buffers.get(chatId)?.reset()
+        }
       }
       break
 
@@ -193,16 +216,13 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
       }
       break
 
-    case 'tool_use_complete': {
-      const info = formatToolUse(msg.toolName, msg.input)
-      await bot.api.sendMessage(numericChatId, info)
+    case 'tool_use_complete':
+      // Tool details are noise for IM users; visible in Desktop if needed.
       break
-    }
 
     case 'tool_result':
-      if (msg.isError) {
-        await bot.api.sendMessage(numericChatId, `❌ 工具执行失败`)
-      }
+      // Tool errors are handled internally by the AI (retries etc.)
+      // No need to notify the user for every failed attempt.
       break
 
     case 'permission_request': {
@@ -245,7 +265,16 @@ bot.command('new', async (ctx) => {
   buffers.get(chatId)?.reset()
   buffers.delete(chatId)
   pendingProjectSelection.delete(chatId)
-  await showProjectPicker(chatId)
+
+  const workDir = config.defaultProjectDir
+  if (workDir) {
+    const ok = await createSessionForChat(chatId, workDir)
+    if (ok) {
+      await bot.api.sendMessage(Number(chatId), '✅ 已新建会话，可以开始对话了。')
+    }
+  } else {
+    await showProjectPicker(chatId)
+  }
 })
 
 bot.command('projects', async (ctx) => {
@@ -308,7 +337,10 @@ bot.on('message:text', (ctx) => {
     // Normal message flow
     const ready = await ensureSession(chatId)
     if (ready) {
-      bridge.sendUserMessage(chatId, text)
+      const sent = bridge.sendUserMessage(chatId, text)
+      if (!sent) {
+        await bot.api.sendMessage(Number(chatId), '⚠️ 消息发送失败，连接可能已断开。请发送 /new 重新开始。')
+      }
     }
   })
 })
