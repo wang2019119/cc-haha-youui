@@ -19,7 +19,6 @@ import {
 } from '../../services/oauth/crypto.js'
 import {
   buildAuthUrl,
-  exchangeCodeForTokens,
   refreshOAuthToken,
   isOAuthTokenExpired,
   parseScopes,
@@ -29,6 +28,7 @@ import type {
   OAuthTokenExchangeResponse,
   SubscriptionType,
 } from '../../services/oauth/types.js'
+import { getOauthConfig } from '../../constants/oauth.js'
 
 export type StoredOAuthTokens = {
   accessToken: string
@@ -47,27 +47,15 @@ export type OAuthSession = {
 }
 
 type RefreshFn = (refreshToken: string, opts?: { scopes?: string[] }) => Promise<OAuthTokens>
-type ExchangeFn = (
-  code: string,
-  state: string,
-  verifier: string,
-  port: number,
-) => Promise<OAuthTokenExchangeResponse>
 
 const SESSION_TTL_MS = 5 * 60 * 1000
 
 export class HahaOAuthService {
   private sessions = new Map<string, OAuthSession>()
   private refreshFn: RefreshFn = refreshOAuthToken
-  private exchangeFn: ExchangeFn = (code, state, verifier, port) =>
-    exchangeCodeForTokens(code, state, verifier, port, false)
 
   setRefreshFn(fn: RefreshFn): void {
     this.refreshFn = fn
-  }
-
-  setExchangeFn(fn: ExchangeFn): void {
-    this.exchangeFn = fn
   }
 
   private getOAuthFilePath(): string {
@@ -89,6 +77,8 @@ export class HahaOAuthService {
   async saveTokens(tokens: StoredOAuthTokens): Promise<void> {
     const filePath = this.getOAuthFilePath()
     await fs.mkdir(path.dirname(filePath), { recursive: true })
+    // 写临时文件再 rename,防止写到一半被其他读者读到残缺 JSON。
+    // 单进程 desktop 下 pid 后缀足够隔离。
     const tmp = `${filePath}.tmp.${process.pid}`
     await fs.writeFile(tmp, JSON.stringify(tokens, null, 2), { mode: 0o600 })
     await fs.rename(tmp, filePath)
@@ -194,7 +184,6 @@ export class HahaOAuthService {
     verifier: string,
     port: number,
   ): Promise<OAuthTokenExchangeResponse> {
-    const { getOauthConfig } = await import('../../constants/oauth.js')
     const requestBody = {
       grant_type: 'authorization_code',
       code,
@@ -204,11 +193,19 @@ export class HahaOAuthService {
       state,
     }
 
-    const res = await fetch(getOauthConfig().TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
-    })
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 15_000)
+    let res: Response
+    try {
+      res = await fetch(getOauthConfig().TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timeoutId)
+    }
     if (!res.ok) {
       throw new Error(
         `Token exchange failed (${res.status}): ${await res.text()}`,
@@ -240,7 +237,11 @@ export class HahaOAuthService {
       }
       await this.saveTokens(updated)
       return updated.accessToken
-    } catch {
+    } catch (err) {
+      console.error(
+        '[HahaOAuthService] token refresh failed:',
+        err instanceof Error ? err.message : err,
+      )
       return null
     }
   }
